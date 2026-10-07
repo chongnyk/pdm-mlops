@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  train-test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # TODO 7d (optional): add ONE extra quality or security step here. Options:
+      #   Lint the code:          run: pip install ruff && ruff check .
+      #   Scan code for bugs:     run: pip install bandit && bandit -r app.py train.py
+      #   Scan dependencies:      run: pip install pip-audit && pip-audit -r requirements.txt
+      # THINK: where in the order should it go? Before training, or at the very end?
+      - name: Extra quality check
+        run: pip install ruff && ruff check .
+
+      # TODO 7a: run the training script (it also enforces your quality gate).
+      - name: Train, track in MLflow and register
+        run: python train.py
+
+      # TODO 7b: run the tests.  HINT: the same command you used in Part 4, without the "!"
+      - name: Run tests
+        run: python -m pytest -q
+
+      # TODO 7c: build the Docker image and tag it "machine-failure-api".
+      # THINK: why build the image only AFTER the tests pass?
+      - name: Build Docker image
+        run: docker build
+
+      - name: Smoke test the running container
+        run: |
+          docker run -d -p 8000:8000 --name api machine-failure-api
+          for i in $(seq 1 30); do curl -fs http://localhost:8000/health && break; sleep 2; done
+          curl -fs -X POST http://localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"air_temp_k":300,"process_temp_k":310.5,"rotational_speed_rpm":1550,"torque_nm":62,"tool_wear_min":230}'
+          docker logs api
+
+      - name: Save model and MLflow records
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-and-mlflow
+          path: |
+            model.joblib
+            metrics.json
+            mlflow.db
+            mlruns/
+            mlartifacts/
+          if-no-files-found: warn

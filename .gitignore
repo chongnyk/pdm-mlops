@@ -1,0 +1,8 @@
+mlflow.db
+mlruns/
+mlartifacts/
+model.joblib
+metrics.json
+*.log
+__pycache__/
+.pytest_cache/
