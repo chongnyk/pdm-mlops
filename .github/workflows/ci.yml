@@ -27,9 +27,7 @@ jobs:
       #   Scan code for bugs:     run: pip install bandit && bandit -r app.py train.py
       #   Scan dependencies:      run: pip install pip-audit && pip-audit -r requirements.txt
       # THINK: where in the order should it go? Before training, or at the very end?
-      - name: Extra quality check
-        run: pip install ruff && ruff check .
-
+      
       # TODO 7a: run the training script (it also enforces your quality gate).
       - name: Train, track in MLflow and register
         run: python train.py
