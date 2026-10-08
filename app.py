@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 import json
 from pathlib import Path
 
+from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
+
+from database import init_db, insert_prediction, get_connection
+
 FEATURES = ["air_temp_k", "process_temp_k", "rotational_speed_rpm", "torque_nm", "tool_wear_min"]
 
 # TODO 3d: use the same THRESHOLD you chose in train.py (TODO 2a). Replace "____" with that number, e.g. "0.3".
@@ -22,6 +26,38 @@ THRESHOLD = float(os.getenv("THRESHOLD", DEFAULT_THRESHOLD))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("machine-failure-api")
+
+REQUESTS = Counter(
+    "machine_failure_api_requests_total",
+    "Total API requests",
+    ["endpoint", "status"],
+)
+
+LATENCY = Histogram(
+    "machine_failure_api_latency_seconds",
+    "API request latency in seconds",
+    ["endpoint"],
+)
+
+PREDICTIONS = Counter(
+    "machine_failure_predictions_total",
+    "Total machine failure predictions",
+    ["predicted"],
+)
+
+PREDICTION_PROBABILITY = Histogram(
+    "machine_failure_prediction_probability",
+    "Distribution of predicted machine failure probabilities",
+    buckets=(0.1, 0.2, 0.3, 0.4, 0.5,
+             0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
+MODEL_THRESHOLD = Gauge(
+    "machine_failure_model_threshold",
+    "Failure probability threshold currently used by the API",
+)
+
+MODEL_THRESHOLD.set(THRESHOLD)
 
 
 def load_model():
@@ -38,6 +74,12 @@ log.info("Model loaded from %s", MODEL_SOURCE)
 
 app = FastAPI(title="Machine Failure Prediction API", version="1.0.0",
               description="Predicts whether a milling machine will fail soon, from one sensor reading.")
+
+init_db()
+
+# Prometheus /metrics endpoint
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 
 # TODO 3a: set limits (ge = minimum, le = maximum) so impossible readings get a 422 error.
@@ -57,6 +99,7 @@ class SensorReading(BaseModel):
 
 
 class Prediction(BaseModel):
+    prediction_id: int
     failure_probability: float
     failure_predicted: bool
     recommended_action: str
@@ -82,18 +125,97 @@ def model_info():
 @app.post("/predict", response_model=Prediction)
 def predict(reading: SensorReading):
     start = time.perf_counter()
-    X = pd.DataFrame([reading.model_dump()])[FEATURES]
-    probability = float(model.predict_proba(X)[0, 1])
-    predicted = probability >= THRESHOLD
+    try:
+        X = pd.DataFrame([reading.model_dump()])[FEATURES]
 
-    # TODO 3b: turn the prediction into an action the machine operator can follow.
-    #   Option A (2 levels): if predicted -> "Schedule maintenance this shift", else "No action needed"
-    #   Option B (3 levels): also "Stop the machine and inspect now" when probability >= 0.7
-    #   Option C (your own): e.g. include the probability in the message
-    # THINK: who reads this on the shop floor? What would make them trust (or ignore) it?
-    action = "Schedule maintenance this shift" if predicted else "No action needed"
+        probability = float(
+            model.predict_proba(X)[0, 1]
+        )
 
-    log.info("predict p=%.3f failure=%s latency_ms=%.1f", probability, predicted,
-             (time.perf_counter() - start) * 1000)
-    return Prediction(failure_probability=round(probability, 4),
-                      failure_predicted=predicted, recommended_action=action)
+        predicted = probability >= THRESHOLD
+
+        action = (
+            "Schedule maintenance this shift"
+            if predicted
+            else "No action needed"
+        )
+
+        # ------------------------------
+        # Update Prometheus metrics
+        # ------------------------------
+
+        PREDICTIONS.labels(
+            predicted=str(predicted).lower()
+        ).inc()
+
+        PREDICTION_PROBABILITY.observe(probability)
+
+        REQUESTS.labels(
+            endpoint="/predict",
+            status="200",
+        ).inc()
+
+        prediction_id = insert_prediction(
+            timestamp=time.time(),
+            reading=reading,
+            prediction_probability=probability,
+            predicted_failure=predicted,
+        )
+
+        return Prediction(
+            prediction_id=prediction_id,
+            failure_probability=round(probability, 4),
+            failure_predicted=predicted,
+            recommended_action=action,
+        )
+
+    except Exception:
+
+        REQUESTS.labels(
+            endpoint="/predict",
+            status="500",
+        ).inc()
+
+        raise
+
+    finally:
+
+        LATENCY.labels(
+            endpoint="/predict"
+        ).observe(
+            time.perf_counter() - start
+        )
+
+@app.post("/outcome/{prediction_id}")
+def record_outcome(
+    prediction_id: int,
+    actual_failure: bool,
+):
+    conn = get_connection()
+
+    cursor = conn.execute(
+        """
+        UPDATE predictions
+        SET actual_failure = ?
+        WHERE id = ?
+        """,
+        (
+            int(actual_failure),
+            prediction_id,
+        ),
+    )
+
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+
+    if updated == 0:
+        return {
+            "error": "prediction not found",
+            "prediction_id": prediction_id,
+        }
+
+    return {
+        "prediction_id": prediction_id,
+        "actual_failure": actual_failure,
+    }

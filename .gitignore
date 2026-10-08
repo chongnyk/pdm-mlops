@@ -6,3 +6,5 @@ metrics.json
 *.log
 __pycache__/
 .pytest_cache/
+
+venv312

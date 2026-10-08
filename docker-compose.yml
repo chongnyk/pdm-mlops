@@ -1,0 +1,43 @@
+services:
+
+  machine-failure-api:
+    image: machine-failure-api-obs:latest
+    container_name: machine-failure-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - machine_failure_data:/app/data
+
+  monitoring:
+    image: machine-failure-monitoring:latest
+    container_name: machine-failure-monitoring
+    ports:
+      - "8001:8000"
+    environment:
+      DB_PATH: /app/data/machine_failure.db
+      REFERENCE_PATH: /app/monitoring_reference.json
+      ROLLING_WINDOW: 100
+    volumes:
+      - machine_failure_data:/app/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  machine_failure_data:
+  grafana_data:

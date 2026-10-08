@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+
+  - job_name: "machine-failure-api"
+    static_configs:
+      - targets: ["machine-failure-api:8000"]
+
+  - job_name: "machine-failure-monitoring"
+    static_configs:
+      - targets: ["monitoring:8000"]
